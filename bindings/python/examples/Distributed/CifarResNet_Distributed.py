@@ -8,160 +8,17 @@
 # This example is meant as an illustration of how to use CNTKs distributed training feature from the python API.
 # The training hyper parameters here are not necessarily optimal and for optimal convergence need to be tuned 
 # for specific parallelization degrees that you want to run the example with.
+# Example for running in parallel:
+#     mpiexec -np 2 python CifarResNet_Distributed.py
 
+import numpy as np
 import sys
 import os
-from examples.CifarResNet.CifarResNet import create_reader, create_resnet_model
-from examples.parallel import launch
-from examples.common.nn import conv_bn_relu_layer, conv_bn_layer, linear_layer, print_training_progress
+from cntk import distributed, device, persist
+from cntk.cntk_py import DeviceKind_GPU
+from examples.CifarResNet.CifarResNet import CIFAR10Reader, CIFAR10TrainManager, create_learner
 
-TRAIN_MAP_FILENAME = 'train_map.txt'
-MEAN_FILENAME = 'CIFAR-10_mean.xml'
-TEST_MAP_FILENAME = 'test_map.txt'
-
-# Trains a residual network model on the Cifar image dataset
-def cifar_resnet_distributed(data_path, run_test, num_epochs, communicator=None, save_model_filename=None, load_model_filename=None):
-    feats_stream_name = 'features'
-    labels_stream_name = 'labels'
-
-    parallelTrain = (communicator != None)
-    
-    minibatch_source = create_reader(
-        os.path.join(data_path, TRAIN_MAP_FILENAME),
-        os.path.join(data_path, MEAN_FILENAME),
-        True,
-        distributed_communicator = communicator)
-
-    features_si = minibatch_source[feats_stream_name]
-    labels_si = minibatch_source[labels_stream_name]
-
-    # Instantiate the resnet model function
-    
-    if load_model_filename:
-        print("Loading model:", load_model_filename)
-        classifier_output = persist.load_model(load_model_filename)
-        image_input = classifier_output.arguments[0]
-    else:
-        image_input = input_variable(
-            (num_channels, image_height, image_width), features_si.m_element_type)
-        classifier_output = create_resnet_model(image_input, num_classes)
-
-    # Instantiate the model function
-
-    label_var = input_variable((num_classes), features_si.m_element_type)
-    ce = cross_entropy_with_softmax(classifier_output, label_var)
-    pe = classification_error(classifier_output, label_var)
-
-    # Instantiate the trainer object to drive the model training
-
-    mb_size = 128
-    num_mb_per_epoch = 100
-    
-    num_mbs = num_mb_per_epoch * num_epochs
-
-    lr_per_sample = [1/mb_size]*80+[0.1/mb_size]*40+[0.01/mb_size]
-    lr_schedule = learning_rate_schedule(lr_per_sample, units = mb_size * num_mb_per_epoch)
-    momentum_time_constant = -mb_size/np.log(0.9)
-
-    # create data parallel distributed trainer if needed
-    dist_trainer = distributed.data_parallel_distributed_trainer(communicator, False) if communicator else None
-
-    # Instantiate the trainer object to drive the model training
-    trainer = Trainer(classifier_output, ce, pe,
-                      [momentum_sgd(classifier_output.parameters, lr_schedule, momentum_time_constant, l2_regularization_weight=0.0001)],
-                      distributed_trainer = dist_trainer)
-    
-    # Get minibatches of images to train with and perform model training
-    training_progress_output_freq = 100 if parallelTrain else 20
-
-    for i in range(0, num_mbs):
-    
-        # NOTE: depends on network, the mb_size can be changed dynamically here
-        mb = minibatch_source.next_minibatch(mb_size)
-
-        # Specify the mapping of input variables in the model to actual
-        # minibatch data to be trained with
-        arguments = {
-                image_input: mb[features_si], 
-                label_var: mb[labels_si]
-                }
-        trainer.train_minibatch(arguments)
-
-        print_training_progress(trainer, i, training_progress_output_freq)
-        
-    if save_model_filename:
-        print("Saving model:", save_model_filename)
-        persist.save_model(classifier_output, save_model_filename)
-
-    if run_test:
-        test_minibatch_source = create_reader(os.path.join(data_path, 'test_map.txt'), os.path.join(data_path, 'CIFAR-10_mean.xml'), False)
-        features_si = test_minibatch_source[feats_stream_name]
-        labels_si = test_minibatch_source[labels_stream_name]
-
-        mb_size = 128
-        num_mbs = 100
-
-        total_error = 0.0
-        for i in range(0, num_mbs):
-            mb = test_minibatch_source.next_minibatch(mb_size)
-
-            # Specify the mapping of input variables in the model to actual
-            # minibatch data to be trained with
-            arguments = {
-                    image_input: mb[features_si], 
-                    label_var: mb[labels_si]
-                    }
-            error = trainer.test_minibatch(arguments)
-            total_error += error
-
-        return total_error / num_mbs
-    else:
-        return 0
-
-        
-def train_and_evaluate(data_path, total_epochs, gpu_count=1):
-    # Create distributed communicator for 1-bit SGD for better scaling to multiple GPUs
-    # If you'd like to avoid quantization loss, use simple one instead
-    quantization_bit = 1
-
-    if (quantization_bit == 32):
-        communicator = distributed.mpi_communicator()
-    else:
-        communicator = distributed.quantized_mpi_communicator(quantization_bit)
-
-    workers = communicator.workers()
-    current_worker = communicator.current_worker()
-    print("List all distributed workers")
-    for wk in workers:
-        if current_worker.global_rank == wk.global_rank:
-            print("* {} {}".format(wk.global_rank, wk.host_id))
-        else:
-            print("  {} {}".format(wk.global_rank, wk.host_id))
-
-    if gpu_count == 1 and len(workers) > 1 :
-        print("Warning: running distributed training on 1-GPU will be slow")
-        device.set_default_device(gpu(0))
-
-    print("Training on device type:{} id:{}".format('gpu' if device.default().type() else 'cpu', device.default().id()))
-
-    start_model = "start_model.bin"
-    num_start_epochs = 1
-    num_parallel_epochs = total_epochs - num_start_epochs
-
-    # training the start model only in one worker
-    if communicator.current_worker().global_rank == 0:
-        cifar_resnet_distributed(data_path, save_model_filename=start_model, communicator=None, run_test=False, num_epochs=num_start_epochs)
-    
-    communicator.barrier()
-    
-    # train in parallel
-    error = cifar_resnet_distributed(data_path, load_model_filename=start_model, communicator=communicator, run_test=True, num_epochs=num_parallel_epochs)
-
-    distributed.Communicator.finalize()
-    return error
-
-    
-if __name__ == '__main__':
+def check_gpu():
     # check if we have multiple-GPU, and fallback to 1 GPU if not
     devices = device.all_devices()
     gpu_count = 0
@@ -173,12 +30,68 @@ if __name__ == '__main__':
         print("No GPU found, exiting")
         quit()
 
-    data_path = os.path.abspath(os.path.normpath(os.path.join(
-        *"../../../../Examples/Image/DataSets/CIFAR-10/".split("/"))))
+    return gpu_count
 
-    os.chdir(data_path)
+def check_config(parallelization):
+    # list all MPI workers
+    workers = parallelization.workers()
+    current_worker = parallelization.current_worker()
+    print("List all distributed workers")
+    for wk in workers:
+        if current_worker.global_rank == wk.global_rank:
+            print("* {} {}".format(wk.global_rank, wk.host_id))
+        else:
+            print("  {} {}".format(wk.global_rank, wk.host_id))
+
+    # check GPU availabilty, as ResNet requires GPU BatchNormalization
+    gpu_count = check_gpu()
+    if gpu_count == 1 and len(workers) > 1 :
+        print("Warning: running distributed training on 1-GPU might be slow")
+        device.set_default_device(gpu(0))
+
+def train_and_evaluate(reader_train, reader_test, max_epochs, warmup_epochs):
+    # Create distributed communicator for 1-bit SGD for better scaling to multiple GPUs
+    # If you'd like to avoid quantization loss, use simple one instead
+    quantization_bit = 1
+    parallelization = distributed.data_parallel(quantization_bit)
+
+    check_config(parallelization)
+
+    # 1-bit SGD requires non-distributed training for a few epochs at the beginning
+    warmup_train_manager = CIFAR10TrainManager(reader_train)
+
+    # training config
+    epoch_size     = 50000
+    minibatch_size = 128
+    warmup_model   = 'warmup.model'
+
+    # create learner
+    learner = create_learner(train_manager.z, epoch_size)
+
+    # start training only in one worker, and save the warm-up model for next step
+    if parallelization.current_worker().global_rank == 0:
+        warmup_train_manager.train(learner, minibatch_size, epoch_size, warmup_epochs,
+                                  save_model_filename = warmup_model)
     
-    total_epochs = 11
-    error = train_and_evaluate(data_path, total_epochs, gpu_count)
+    # all workers need to sync before entering next step
+    parallelization.barrier()
     
-    print("Error: %f" % error)
+    train_manager = CIFAR10TrainManager(reader_train, reader_test, load_model_filename = warmup_model)
+
+    train_manager.train(learner, minibatch_size, epoch_size, max_epochs - warmup_epochs)
+
+    #
+    # Evaluation action
+    #
+    epoch_size     = 10000
+    minibatch_size = 16
+    train_manager.test(minibatch_size, epoch_size)
+
+    # clean up MPI, cannot call any Parallelization functions afterwards
+    distributed.Parallelization.finalize()
+
+if __name__ == '__main__':
+    reader_train = create_cifar10_reader(os.path.join(data_path, 'train_map.txt'), os.path.join(data_path, 'CIFAR-10_mean.xml'), True)
+    reader_test  = create_cifar10_reader(os.path.join(data_path, 'test_map.txt'), os.path.join(data_path, 'CIFAR-10_mean.xml'), False)
+
+    train_and_evaluate(reader_train, reader_test, max_epochs=5, warmup_epochs=1)

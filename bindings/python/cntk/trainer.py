@@ -27,9 +27,9 @@ class Trainer(cntk_py.Trainer):
        loss_function (:class:`cntk.ops.functions.Function`): loss function 
        eval_function (:class:`cntk.ops.functions.Function`): evaluation function
        parameter_learners (`list`): list of learners from :mod:`cntk.learner`
-       distributed_trainer (:class:`cntk.distributed.distributed_trainer`): distributed trainer
+       parallelization (:class:`cntk.distributed.Parallelization`): optional parallelization instance
     '''
-    def __init__(self, model, loss_function, eval_function, parameter_learners, distributed_trainer=None):
+    def __init__(self, model, loss_function, eval_function, parameter_learners, parallelization=None):
         # TODO sanitizing should be removed once Swig's typemaps are in place
         model = sanitize_function(model)
         loss_function = sanitize_function(loss_function)
@@ -37,9 +37,9 @@ class Trainer(cntk_py.Trainer):
         if not isinstance(parameter_learners, list):
             parameter_learners = [parameter_learners]
 
-        if distributed_trainer:
+        if parallelization:
             super(Trainer, self).__init__(model, loss_function, eval_function,
-                parameter_learners, distributed_trainer)
+                parameter_learners, parallelization.dist_trainer)
         else:
             super(Trainer, self).__init__(model, loss_function, eval_function,
                 parameter_learners)
