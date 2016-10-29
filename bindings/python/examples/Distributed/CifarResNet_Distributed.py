@@ -15,8 +15,17 @@ import numpy as np
 import sys
 import os
 from cntk import distributed, device, persist
+from cntk.learner import momentum_sgd, learning_rate_schedule
 from cntk.cntk_py import DeviceKind_GPU
-from examples.CifarResNet.CifarResNet import CIFAR10Reader, CIFAR10TrainManager, create_learner
+from examples.CifarResNet.CifarResNet import CIFAR10Reader, CIFAR10TrainManager
+
+#
+# Paths relative to current python file.
+#
+abs_path   = os.path.dirname(os.path.abspath(__file__))
+cntk_path  = os.path.normpath(os.path.join(abs_path, "..", "..", "..", ".."))
+data_path  = os.path.join(cntk_path, "Examples", "Image", "DataSets", "CIFAR-10")
+model_path = os.path.join(abs_path, "Models")
 
 def check_gpu():
     # check if we have multiple-GPU, and fallback to 1 GPU if not
@@ -49,7 +58,7 @@ def check_config(parallelization):
         print("Warning: running distributed training on 1-GPU might be slow")
         device.set_default_device(gpu(0))
 
-def train_and_evaluate(reader_train, reader_test, max_epochs, warmup_epochs):
+def train_and_evaluate(max_epochs, warmup_epochs):
     # Create distributed communicator for 1-bit SGD for better scaling to multiple GPUs
     # If you'd like to avoid quantization loss, use simple one instead
     quantization_bit = 1
@@ -57,28 +66,40 @@ def train_and_evaluate(reader_train, reader_test, max_epochs, warmup_epochs):
 
     check_config(parallelization)
 
+    # create distributed reader
+    reader_train = CIFAR10Reader(os.path.join(data_path, 'train_map.txt'), os.path.join(data_path, 'CIFAR-10_mean.xml'), True, parallelization)
+    reader_test  = CIFAR10Reader(os.path.join(data_path, 'test_map.txt'), os.path.join(data_path, 'CIFAR-10_mean.xml'), False)
+
     # 1-bit SGD requires non-distributed training for a few epochs at the beginning
     warmup_train_manager = CIFAR10TrainManager(reader_train)
 
     # training config
     epoch_size     = 50000
     minibatch_size = 128
-    warmup_model   = 'warmup.model'
+    warmup_model   = os.path.join(model_path, 'warmup.model')
 
     # create learner
-    learner = create_learner(train_manager.z, epoch_size)
-
+    lr_per_sample          = [1/minibatch_size]*80+[0.1/minibatch_size]*40+[0.01/minibatch_size]
+    lr_schedule            = learning_rate_schedule(lr_per_sample, units=epoch_size)
+    momentum_time_constant = -minibatch_size/np.log(0.9)
+    l2_reg_weight          = 0.0001
+    
     # start training only in one worker, and save the warm-up model for next step
     if parallelization.current_worker().global_rank == 0:
-        warmup_train_manager.train(learner, minibatch_size, epoch_size, warmup_epochs,
-                                  save_model_filename = warmup_model)
+        warmup_train_manager.train(momentum_sgd(warmup_train_manager.z.parameters, lr_schedule, momentum_time_constant,
+                                                l2_regularization_weight = l2_reg_weight), 
+                                   minibatch_size, epoch_size, warmup_epochs,
+                                   save_model_filename = warmup_model)
     
     # all workers need to sync before entering next step
     parallelization.barrier()
     
     train_manager = CIFAR10TrainManager(reader_train, reader_test, load_model_filename = warmup_model)
 
-    train_manager.train(learner, minibatch_size, epoch_size, max_epochs - warmup_epochs)
+    # NOTE, the parallel step uses the same lr_schedule
+    train_manager.train(momentum_sgd(train_manager.z.parameters, lr_schedule, momentum_time_constant,
+                                     l2_regularization_weight = l2_reg_weight), 
+                        minibatch_size, epoch_size, max_epochs - warmup_epochs)
 
     #
     # Evaluation action
@@ -91,7 +112,4 @@ def train_and_evaluate(reader_train, reader_test, max_epochs, warmup_epochs):
     distributed.Parallelization.finalize()
 
 if __name__ == '__main__':
-    reader_train = create_cifar10_reader(os.path.join(data_path, 'train_map.txt'), os.path.join(data_path, 'CIFAR-10_mean.xml'), True)
-    reader_test  = create_cifar10_reader(os.path.join(data_path, 'test_map.txt'), os.path.join(data_path, 'CIFAR-10_mean.xml'), False)
-
-    train_and_evaluate(reader_train, reader_test, max_epochs=5, warmup_epochs=1)
+    train_and_evaluate(max_epochs=5, warmup_epochs=1)

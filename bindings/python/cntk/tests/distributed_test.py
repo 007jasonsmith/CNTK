@@ -25,22 +25,17 @@ def run_distributed_trainer(tmpdir, quantized):
 
     m_schedule = momentum_schedule(1100)
 
-    if quantized:
-        communicator = distributed.quantized_mpi_communicator(1)
-    else:
-        communicator = distributed.mpi_communicator()
+    parallelization = distributed.data_parallel(1 if quantized else 32)
 
-    workers = communicator.workers()
-    current_worker = communicator.current_worker()
+    workers = parallelization.workers()
+    current_worker = parallelization.current_worker()
     found_rank = len([wk for wk in workers if current_worker.global_rank == wk.global_rank]) == 1
     
     assert found_rank
             
-    dist_trainer = distributed.data_parallel_distributed_trainer(communicator, False)
-
     trainer = Trainer(z, ce, errs,
                       sgd(z.parameters, 0.007, m_schedule, 0.5, True),
-                      distributed_trainer=dist_trainer)
+                      parallelization)
     in1_value = [[1],[2]]
     label_value = [[0], [1]]
     arguments = {in1: in1_value, labels: label_value}
@@ -51,7 +46,7 @@ def run_distributed_trainer(tmpdir, quantized):
     trainer.save_checkpoint(p)
     trainer.restore_from_checkpoint(p)
 
-    communicator.barrier()
+    parallelization.barrier()
     
     assert trainer.model.name == 'z'
 
@@ -64,5 +59,5 @@ def test_distributed(tmpdir, is_1bit_sgd):
     if is_1bit_sgd == 0:
         pytest.skip("skip non-1-bit test for now")
     run_distributed_trainer(tmpdir, quantized=(True if is_1bit_sgd==1 else False))
-    distributed.Communicator.finalize()
+    distributed.Parallelization.finalize()
     

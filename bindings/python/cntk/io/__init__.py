@@ -66,8 +66,7 @@ class MinibatchSource(cntk_py.MinibatchSource):
         if not isinstance(deserializers, (list,tuple)):
             deserializers = [deserializers] # allow passing a single item or a list
         reader_config = ReaderConfig(deserializers=deserializers, randomize=randomize, epoch_size=epoch_size)
-        comm = None if parallelization == None else parallelization.comm
-        source = minibatch_source(reader_config, comm)
+        source = minibatch_source(reader_config, parallelization)
         # transplant into this class instance
         self.__dict__ = source.__dict__
         # transplant all members of deserializers into a record called streams

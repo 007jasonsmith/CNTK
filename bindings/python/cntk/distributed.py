@@ -34,35 +34,30 @@ class Parallelization:
     '''
     Creates a parallization object that encapsulates distributed communicator and distributed trainer
     '''
-    def __init(self, communicator, distributed_trainer):
+    def __init__(self, communicator, distributed_trainer):
         self.comm = communicator
         self.dist_trainer = distributed_trainer
-    
+
+    # TODO: change workers/current_worker/barrier to be staticmethod (C++ side as well)
     @typemap
     def workers(self):
         '''
-        Returns workers in this communicator.
-        
-        Returns:
-            (`list`) of :class:`WorkerDescriptor`: workers in this communicator.
+        (`list`) of :class:`WorkerDescriptor`: workers in this communicator.
         '''
-        return comm.workers()
+        return self.comm.workers()
 
     @typemap
     def current_worker(self):
         '''
-        Returns worker descriptor of current process.
-        
-        Returns:
-            :class:`WorkerDescriptor`: descriptor of current process.
+        :class:`WorkerDescriptor`: descriptor of current process.
         '''
-        return comm.current_worker()
+        return self.comm.current_worker()
 
     def barrier(self):
         '''
         sync point to make sure all workers reach the same state
         '''
-        comm.barrier()
+        self.comm.barrier()
         
     @staticmethod
     def finalize():
@@ -83,8 +78,8 @@ def data_parallel(bits=32):
     '''
     if bits == 32:
         comm = cntk_py.mpicommunicator()
-        dist_trainer = cntk_py.create_data_parallel_distributed_trainer(communicator, useAsyncBufferedParameterUpdate=False)
+        dist_trainer = cntk_py.create_data_parallel_distributed_trainer(comm, False)
     else:
-        comm = cntk_py.quantized_mpicommunicator(True, True, num_quantization_bits)
-        dist_trainer = cntk_py.create_quantized_data_parallel_distributed_trainer(communicator, useAsyncBufferedParameterUpdate=False)
+        comm = cntk_py.quantized_mpicommunicator(True, True, bits)
+        dist_trainer = cntk_py.create_quantized_data_parallel_distributed_trainer(comm, False)
     return Parallelization(comm, dist_trainer)

@@ -66,19 +66,19 @@ class CIFAR10Reader(MinibatchSource):
 
     @property
     def features_data_type(self):
-        return super()[features_stream_name].m_element_type
+        return self[CIFAR10Reader.features_stream_name].m_element_type
         
     @property
     def labels_data_type(self):
-        return super()[labels_stream_name].m_element_type
+        return self[CIFAR10Reader.labels_stream_name].m_element_type
         
     @property
     def features_stream(self):
-        return super().streams[features_stream_name]
+        return self.streams[CIFAR10Reader.features_stream_name]
         
     @property
     def labels_stream(self):
-        return super().streams[labels_stream_name]
+        return self.streams[CIFAR10Reader.labels_stream_name]
 #
 # Resnet building blocks
 #
@@ -148,18 +148,14 @@ class CIFAR10TrainManager:
             # when load model from file, input_var needs to bound to the loaded model
             print("Loading model:", load_model_filename)
             self.z = persist.load_model(load_model_filename)
-            self.input_var = z.arguments[0]
-            assert image_input.get_data_type() == input_data_type
+            self.input_var = self.z.arguments[0]
+            assert self.input_var.get_data_type() == reader_train.features_data_type
         else:
             self.input_var = input_variable(
                 shape = (num_channels, image_height, image_width),
-                data_type = input_data_type)
-            self.z = create_resnet_model(image_input, num_classes)
+                data_type = reader_train.features_data_type)
+            self.z = create_resnet_model(self.input_var, num_classes)
             
-    @property
-    def z(self):
-        return self.z
-
     def train(self, learner, minibatch_size, epoch_size, max_epochs, parallelization=None, save_model_filename=None):
         # Instantiate the training criterion function
         
@@ -167,11 +163,11 @@ class CIFAR10TrainManager:
         pe = classification_error(self.z, self.label_var)
 
         # Instantiate the trainer object to drive the model training
-        trainer = Trainer(z, ce, pe,
+        trainer = Trainer(self.z, ce, pe,
                           learner,
                           parallelization)
 
-        log_number_of_parameters(z)
+        log_number_of_parameters(self.z)
         print()
         progress_printer = ProgressPrinter(tag='Training')
 
@@ -189,14 +185,14 @@ class CIFAR10TrainManager:
                 num_samples = min(minibatch_size, epoch_size - sample_count)
                 data = reader.next_minibatch(num_samples, input_map=input_map)  # fetch minibatch
                 trainer.train_minibatch(data)                                   # update model with it
-                sample_count += .num_samples                                    # count samples processed so far
+                sample_count += num_samples                                    # count samples processed so far
                 progress_printer.update_with_trainer(trainer, with_metric=True) # log progress
             progress_printer.epoch_summary(with_metric=True)
 
         # If in parallel training, only save model in worker_0
         if save_model_filename and (parallelization==None or parallelization.current_worker().global_rank == 0):
             print("Saving model:", save_model_filename)
-            persist.save_model(classifier_output, save_model_filename)
+            persist.save_model(self.z, save_model_filename)
 
         self.trainer = trainer
 
@@ -218,7 +214,7 @@ class CIFAR10TrainManager:
             num_samples = min(minibatch_size, epoch_size - sample_count)
 
             # Fetch next test min batch.
-            data = reader.next_minibatch(num_samples, input_map=input_map)
+            data = self.reader_test.next_minibatch(num_samples, input_map=input_map)
 
             # minibatch data to be tested with
             metric_numer += self.trainer.test_minibatch(data) * num_samples
@@ -234,15 +230,13 @@ class CIFAR10TrainManager:
 
         return metric_numer/metric_denom
             
-def create_learner(z, epoch_size):
+def create_learner(z, epoch_size, minibatch_size):
     # Set learning parameters
     lr_per_sample          = [1/minibatch_size]*80+[0.1/minibatch_size]*40+[0.01/minibatch_size]
     lr_schedule            = learning_rate_schedule(lr_per_sample, units=epoch_size)
     momentum_time_constant = -minibatch_size/np.log(0.9)
     l2_reg_weight          = 0.0001
     
-    # trainer object
-    lr_schedule = learning_rate_schedule(lr_per_sample, units=epoch_size)
     return momentum_sgd(z.parameters, lr_schedule, momentum_time_constant,
                         l2_regularization_weight = l2_reg_weight)  
 
@@ -258,7 +252,7 @@ def train_and_evaluate(reader_train, reader_test, max_epochs):
     minibatch_size = 128
 
     # create learner
-    learner = create_learner(train_manager.z, epoch_size)
+    learner = create_learner(train_manager.z, epoch_size, minibatch_size)
 
     # start training
     train_manager.train(learner, minibatch_size, epoch_size, max_epochs)
@@ -271,7 +265,7 @@ def train_and_evaluate(reader_train, reader_test, max_epochs):
     train_manager.test(minibatch_size, epoch_size)
 
 if __name__=='__main__':
-    reader_train = create_cifar10_reader(os.path.join(data_path, 'train_map.txt'), os.path.join(data_path, 'CIFAR-10_mean.xml'), True)
-    reader_test  = create_cifar10_reader(os.path.join(data_path, 'test_map.txt'), os.path.join(data_path, 'CIFAR-10_mean.xml'), False)
+    reader_train = CIFAR10Reader(os.path.join(data_path, 'train_map.txt'), os.path.join(data_path, 'CIFAR-10_mean.xml'), True)
+    reader_test  = CIFAR10Reader(os.path.join(data_path, 'test_map.txt'), os.path.join(data_path, 'CIFAR-10_mean.xml'), False)
 
     train_and_evaluate(reader_train, reader_test, max_epochs=5)
